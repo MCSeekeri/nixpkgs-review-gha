@@ -10,6 +10,11 @@ on:
         description: "Packages"
         required: false
         type: string
+      push-to-cache:
+        description: "Push to cache"
+        required: true
+        type: boolean
+        default: true
       x86_64-linux:
         description: "Build on x86_64-linux"
         required: true
@@ -77,8 +82,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-        with:
-          sparse-checkout: .github/actions
 
       - name: setup nix
         uses: ./.github/actions/setup-nix
@@ -95,9 +98,47 @@ jobs:
           ssh-key: ${{ (vars.USE_BUILDERS == 'yes' || vars.USE_BUILDERS == 'always') && secrets.SSH_KEY || '' }}
           ssh-cert: ${{ (vars.USE_BUILDERS == 'yes' || vars.USE_BUILDERS == 'always') && secrets.SSH_CERT || '' }}
 
+      - name: install packages
+        if: ${{ inputs.packages != '' && inputs.push-to-cache && ((vars.ATTIC_SERVER != '' && vars.ATTIC_CACHE != '') || vars.CACHIX_CACHE != '') }}
+        run: |
+          pkgs=(coreutils)
+          if [[ ${{ vars.ATTIC_SERVER != '' && vars.ATTIC_CACHE != '' }} = true ]]; then
+            pkgs+=(attic-client)
+          elif [[ ${{ vars.CACHIX_CACHE != '' }} = true ]]; then
+            pkgs+=(cachix)
+          fi
+          nix profile add "${pkgs[@]/#/.#}" --builders ''
+
       - name: nix build
         run: nix build --keep-going -L ${{ inputs.packages }}
         if: ${{ inputs.packages != '' }}
+
+      - name: push results to cache
+        if: ${{ inputs.packages != '' && inputs.push-to-cache && ((vars.ATTIC_SERVER != '' && vars.ATTIC_CACHE != '') || vars.CACHIX_CACHE != '') }}
+        run: |
+          set -ex
+
+          (realpath -qe result* || true) > paths
+          [[ -s paths ]] || exit 0
+
+          if [[ ${{ vars.ATTIC_SERVER != '' && vars.ATTIC_CACHE != '' }} = true ]]; then
+            attic login default "$ATTIC_SERVER" "$ATTIC_TOKEN"
+            if ! attic cache info "$ATTIC_CACHE"; then
+              echo "::error::attic returned an error"
+              exit 0
+            fi
+            attic push --stdin "$ATTIC_CACHE" < paths
+          elif [[ ${{ vars.CACHIX_CACHE != '' }} = true ]]; then
+            [[ -n "$CACHIX_SIGNING_KEY" ]] || unset CACHIX_SIGNING_KEY
+            cachix push "$CACHIX_CACHE" < paths
+          fi
+        env:
+          ATTIC_SERVER: ${{ vars.ATTIC_SERVER }}
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+          CACHIX_CACHE: ${{ vars.CACHIX_CACHE }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_SIGNING_KEY: ${{ secrets.CACHIX_SIGNING_KEY }}
 
       - name: set GITHUB_TOKEN
         if: ${{ inputs.upterm }}
